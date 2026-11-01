@@ -1,0 +1,363 @@
+''' One CSV record. Fields are mutable strings in an ordered resizable array.
+Public Class CSVRecord
+    Public Property Fields As Array Of String
+End Class
+
+Private Sub ValidateCSVDelimiter(delimiter As String)
+    If String.Len(delimiter) <> 1 Or delimiter = "\"" Or delimiter = "\r" Or delimiter = "\n" Then
+        Throw New InvalidArgumentException("CSV delimiter must be one character other than quote, CR or LF")
+    End If
+End Sub
+
+Private Sub FinishCSVField(record As CSVRecord, pieces As Array Of String, maxFields As Integer)
+    If Array.Count(record.Fields) >= maxFields Then Throw New InvalidArgumentException("CSV field-count limit exceeded")
+    Array.Append(record.Fields, String.Join(pieces, ""))
+    Array.Clear(pieces)
+End Sub
+
+''' Parse complete CSV text. Quoted fields preserve embedded CR/LF exactly.
+Public Function ParseCSV(text As String, delimiter As String = ",", maxCharacters As Integer = 1000000, maxRecords As Integer = 100000, maxFields As Integer = 10000) As Array Of CSVRecord
+    ValidateCSVDelimiter(delimiter)
+    If maxCharacters < 1 Or maxRecords < 1 Or maxFields < 1 Then Throw New InvalidArgumentException("CSV limits must be positive")
+    If String.Len(text) > maxCharacters Then Throw New InvalidArgumentException("CSV input character limit exceeded")
+    Dim records() As CSVRecord
+    If String.Len(text) = 0 Then Return records
+    Dim chars As Array Of String = String.Chars(text)
+    Dim record As New CSVRecord()
+    Dim pieces() As String
+    Dim quoted As Boolean
+    Dim closedQuote As Boolean
+    Dim atFieldStart As Boolean = True
+    Dim pendingRecord As Boolean
+    Dim i As Integer = 0
+    While i < Array.Count(chars)
+        Dim ch As String = chars(i)
+        If quoted Then
+            If ch = "\"" Then
+                If i + 1 < Array.Count(chars) Then
+                    If chars(i + 1) = "\"" Then
+                        Array.Append(pieces, "\"")
+                        i += 2
+                        Continue While
+                    End If
+                End If
+                quoted = False
+                closedQuote = True
+            Else
+                Array.Append(pieces, ch)
+            End If
+        ElseIf String.Compare(ch, delimiter, True) = 0 Then
+            FinishCSVField(record, pieces, maxFields)
+            atFieldStart = True
+            closedQuote = False
+            pendingRecord = True
+        ElseIf ch = "\r" Or ch = "\n" Then
+            FinishCSVField(record, pieces, maxFields)
+            If Array.Count(records) >= maxRecords Then Throw New InvalidArgumentException("CSV record-count limit exceeded")
+            Array.Append(records, record)
+            record = New CSVRecord()
+            atFieldStart = True
+            closedQuote = False
+            pendingRecord = False
+            If ch = "\r" And i + 1 < Array.Count(chars) Then
+                If chars(i + 1) = "\n" Then i += 1
+            End If
+        ElseIf closedQuote Then
+            Throw New InvalidArgumentException("CSV text follows a closing quote at character " + String.From(i + 1))
+        ElseIf ch = "\"" Then
+            If Not atFieldStart Then Throw New InvalidArgumentException("CSV quote inside unquoted field at character " + String.From(i + 1))
+            quoted = True
+            atFieldStart = False
+            pendingRecord = True
+        Else
+            Array.Append(pieces, ch)
+            atFieldStart = False
+            pendingRecord = True
+        End If
+        i += 1
+    End While
+    If quoted Then Throw New InvalidArgumentException("CSV unterminated quoted field")
+    If pendingRecord Then
+        FinishCSVField(record, pieces, maxFields)
+        If Array.Count(records) >= maxRecords Then Throw New InvalidArgumentException("CSV record-count limit exceeded")
+        Array.Append(records, record)
+    End If
+    Return records
+End Function
+
+''' Incremental character-chunk CSV parser with a bounded drainable record queue.
+Public Class CSVStreamParser
+    Private Property mDelimiter As String
+    Private Property mMaxRecord As Integer
+    Private Property mMaxFields As Integer
+    Private Property mMaxReady As Integer
+    Private Property mMaxBuffered As Integer
+    Private Property mMaxChunk As Integer
+    Private Property mReady As Array Of CSVRecord = []
+    Private Property mSizes As Array Of Integer = []
+    Private Property mQueuedCharacters As Integer = 0
+    Private Property mRecordCharacters As Integer = 0
+    Private Property mRecord As CSVRecord = New CSVRecord()
+    Private Property mPieces As Array Of String = []
+    Private Property mState As Integer = 0
+    Private Property mAtFieldStart As Boolean = True
+    Private Property mPending As Boolean = False
+    Private Property mSkipLF As Boolean = False
+    Private Property mFailed As Boolean = False
+    Private Property mFinished As Boolean = False
+
+    Public Sub Constructor(delimiter As String = ",", maxRecordCharacters As Integer = 1000000, maxFields As Integer = 10000, maxReadyRecords As Integer = 128, maxBufferedCharacters As Integer = 1000000, maxChunkCharacters As Integer = 16384)
+        ValidateCSVDelimiter(delimiter)
+        If maxRecordCharacters < 1 Or maxRecordCharacters > 16777216 Or maxFields < 1 Or maxFields > 100000 Or maxReadyRecords < 1 Or maxReadyRecords > 10000 Or maxBufferedCharacters < 1 Or maxBufferedCharacters > 67108864 Or maxChunkCharacters < 1 Or maxChunkCharacters > 1048576 Then
+            Throw New InvalidArgumentException("CSV streaming limits outside supported bounds")
+        End If
+        mDelimiter = delimiter
+        mMaxRecord = maxRecordCharacters
+        mMaxFields = maxFields
+        mMaxReady = maxReadyRecords
+        mMaxBuffered = maxBufferedCharacters
+        mMaxChunk = maxChunkCharacters
+    End Sub
+
+    Public Property ReadyCount As Integer
+        Get
+            Return Array.Count(mReady)
+        End Get
+    End Property
+    Public Property BufferedCharacters As Integer
+        Get
+            Return mQueuedCharacters + mRecordCharacters
+        End Get
+    End Property
+    Public Property Failed As Boolean
+        Get
+            Return mFailed
+        End Get
+    End Property
+    Public Property IsFinished As Boolean
+        Get
+            Return mFinished
+        End Get
+    End Property
+
+    Public Sub Reset()
+        Array.Clear(mReady)
+        Array.Clear(mSizes)
+        mQueuedCharacters = 0
+        mRecordCharacters = 0
+        mRecord = New CSVRecord()
+        Array.Clear(mPieces)
+        mState = 0
+        mAtFieldStart = True
+        mPending = False
+        mSkipLF = False
+        mFailed = False
+        mFinished = False
+    End Sub
+
+    Private Sub Poison()
+        Me.Reset()
+        mFailed = True
+    End Sub
+
+    Private Sub FinishField()
+        FinishCSVField(mRecord, mPieces, mMaxFields)
+    End Sub
+
+    Private Sub FinishRecord()
+        If Array.Count(mReady) >= mMaxReady Then Throw New InvalidArgumentException("CSV ready-record limit exceeded; drain records between feeds")
+        Array.Append(mReady, mRecord)
+        Array.Append(mSizes, mRecordCharacters)
+        mQueuedCharacters += mRecordCharacters
+        mRecordCharacters = 0
+        mRecord = New CSVRecord()
+        mAtFieldStart = True
+        mPending = False
+        mState = 0
+    End Sub
+
+    Private Sub Accept(ch As String)
+        If mSkipLF Then
+            mSkipLF = False
+            If ch = "\n" Then Return
+        End If
+        If mRecordCharacters >= mMaxRecord Then Throw New InvalidArgumentException("CSV record character limit exceeded")
+        If Me.BufferedCharacters >= mMaxBuffered Then Throw New InvalidArgumentException("CSV buffered character limit exceeded; drain records between feeds")
+        mRecordCharacters += 1
+        If mState = 1 Then
+            If ch = "\"" Then
+                mState = 2
+            Else
+                Array.Append(mPieces, ch)
+            End If
+        ElseIf mState = 2 And ch = "\"" Then
+            Array.Append(mPieces, "\"")
+            mState = 1
+        ElseIf String.Compare(ch, mDelimiter, True) = 0 Then
+            Me.FinishField()
+            mState = 0
+            mAtFieldStart = True
+            mPending = True
+        ElseIf ch = "\r" Or ch = "\n" Then
+            Me.FinishField()
+            Me.FinishRecord()
+            mSkipLF = ch = "\r"
+        ElseIf mState = 2 Then
+            Throw New InvalidArgumentException("CSV text follows a closing quote")
+        ElseIf ch = "\"" Then
+            If Not mAtFieldStart Then Throw New InvalidArgumentException("CSV quote inside unquoted field")
+            mState = 1
+            mAtFieldStart = False
+            mPending = True
+        Else
+            Array.Append(mPieces, ch)
+            mAtFieldStart = False
+            mPending = True
+        End If
+    End Sub
+
+    Public Sub Feed(chunk As String)
+        If mFailed Then Throw New InvalidArgumentException("CSV parser failed; Reset is required")
+        If mFinished Then Throw New InvalidArgumentException("CSV parser finished; Reset is required")
+        Try
+            If String.Len(chunk) > mMaxChunk Then Throw New InvalidArgumentException("CSV feed chunk character limit exceeded")
+            Dim characters As Array Of String = String.Chars(chunk)
+            For Each ch As String In characters
+                Me.Accept(ch)
+            Next
+        Catch e As Exception
+            Me.Poison()
+            Throw e
+        End Try
+    End Sub
+
+    Public Sub Finish()
+        If mFailed Then Throw New InvalidArgumentException("CSV parser failed; Reset is required")
+        If mFinished Then Return
+        Try
+            If mState = 1 Then Throw New InvalidArgumentException("CSV unterminated quoted field")
+            If mPending Then
+                Me.FinishField()
+                Me.FinishRecord()
+            End If
+            mFinished = True
+        Catch e As Exception
+            Me.Poison()
+            Throw e
+        End Try
+    End Sub
+
+    Public Function Take() As CSVRecord
+        If mFailed Then Throw New InvalidArgumentException("CSV parser failed; Reset is required")
+        If Array.Count(mReady) = 0 Then Throw New InvalidArgumentException("CSV ready-record queue is empty")
+        Dim record As CSVRecord = mReady(0)
+        mQueuedCharacters -= mSizes(0)
+        Array.RemoveAt(mReady, 0)
+        Array.RemoveAt(mSizes, 0)
+        Return record
+    End Function
+End Class
+
+''' Encode records with CRLF endings, always including a final record terminator.
+Public Function WriteCSV(records As Array Of CSVRecord, delimiter As String = ",", maxCharacters As Integer = 1000000) As String
+    ValidateCSVDelimiter(delimiter)
+    If maxCharacters < 1 Then Throw New InvalidArgumentException("CSV output limit must be positive")
+    Dim lines() As String
+    Dim size As Integer
+    For Each record As CSVRecord In records
+        If record = Nil Then Throw New InvalidArgumentException("CSV record must not be Nil")
+        If Array.Count(record.Fields) = 0 Then Throw New InvalidArgumentException("CSV record must have at least one field")
+        Dim fields() As String
+        For Each field As String In record.Fields
+            If Array.Count(fields) > 0 Then
+                If size >= maxCharacters Then Throw New InvalidArgumentException("CSV output character limit exceeded")
+                size += 1
+            End If
+            Dim encoded As String = field
+            If (Array.Count(record.Fields) = 1 And String.Len(field) = 0) Or String.Contains(field, delimiter, True) Or String.Contains(field, "\"", True) Or String.Contains(field, "\r", True) Or String.Contains(field, "\n", True) Then
+                If String.Len(field) > maxCharacters Then Throw New InvalidArgumentException("CSV output character limit exceeded")
+                encoded = "\"" + String.Replace(field, "\"", "\"\"", True) + "\""
+            End If
+            If String.Len(encoded) > maxCharacters - size Then Throw New InvalidArgumentException("CSV output character limit exceeded")
+            size += String.Len(encoded)
+            Array.Append(fields, encoded)
+        Next
+        If 2 > maxCharacters - size Then Throw New InvalidArgumentException("CSV output character limit exceeded")
+        size += 2
+        Array.Append(lines, String.Join(fields, delimiter) + "\r\n")
+    Next
+    Return String.Join(lines, "")
+End Function
+
+''' Synchronous recipient of one complete UTF-8 CSV record per call.
+Public Interface CSVByteSink
+    Sub WriteCSVBytes(data As Bytes)
+End Interface
+
+''' Incremental CSV encoder. Failed writes are terminal; output is not atomic.
+Public Class CSVStreamWriter
+    Private Property mSink As CSVByteSink
+    Private Property mDelimiter As String
+    Private Property mMaxBytes As Integer
+    Private Property mMaxRecords As Integer
+    Private Property mMaxRecordBytes As Integer
+    Private Property mBytes As Integer
+    Private Property mRecords As Integer
+    Private Property mFailed As Boolean
+    Private Property mWriting As Boolean
+
+    Public Sub Constructor(sink As CSVByteSink, delimiter As String = ",", maxBytes As Integer = 16000000, maxRecords As Integer = 100000, maxRecordBytes As Integer = 1000000)
+        If sink Is Nil Then Throw New InvalidArgumentException("CSV sink must not be Nil")
+        ValidateCSVDelimiter(delimiter)
+        If maxBytes < 1 Or maxRecords < 1 Or maxRecordBytes < 1 Or maxRecordBytes > 16000000 Then Throw New InvalidArgumentException("Invalid CSV stream limits")
+        mSink = sink
+        mDelimiter = delimiter
+        mMaxBytes = maxBytes
+        mMaxRecords = maxRecords
+        mMaxRecordBytes = maxRecordBytes
+    End Sub
+
+    Public Property BytesWritten As Integer
+        Get
+            Return mBytes
+        End Get
+    End Property
+    Public Property RecordsWritten As Integer
+        Get
+            Return mRecords
+        End Get
+    End Property
+    Public Property Failed As Boolean
+        Get
+            Return mFailed
+        End Get
+    End Property
+
+    Public Sub Write(record As CSVRecord)
+        If mFailed Then Throw New InvalidArgumentException("CSV writer failed")
+        If mWriting Then
+            mFailed = True
+            Throw New InvalidArgumentException("CSV writer does not support reentry")
+        End If
+        mWriting = True
+        Try
+            If mRecords >= mMaxRecords Then Throw New InvalidArgumentException("CSV record limit exceeded")
+            Dim remaining As Integer = Math.Min(mMaxRecordBytes, mMaxBytes - mBytes)
+            If remaining < 1 Then Throw New InvalidArgumentException("CSV byte limit exceeded")
+            Dim one() As CSVRecord
+            Array.Append(one, record)
+            Dim encoded As Bytes = Bytes.FromString(WriteCSV(one, mDelimiter, remaining), Text.Encodings.UTF8)
+            Dim size As Integer = encoded.Count
+            If size > remaining Then Throw New InvalidArgumentException("CSV byte limit exceeded")
+            mSink.WriteCSVBytes(encoded)
+            If mFailed Then Throw New InvalidArgumentException("CSV writer failed during sink call")
+            mBytes += size
+            mRecords += 1
+        Catch e As Exception
+            mFailed = True
+            Throw e
+        Finally
+            mWriting = False
+        End Try
+    End Sub
+End Class
