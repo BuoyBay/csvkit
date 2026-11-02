@@ -54,7 +54,6 @@ allocate an escaped field up to roughly twice its original character count.
 - [Getting started](getting-started.md)
 - [API reference](api.md)
 
-
 [Full typed API: properties, parameters, defaults, and returns](typed-api.md)
 
 ## Incremental UTF-8 export
@@ -100,7 +99,7 @@ For generated or query rows, create and submit one record inside the producer's
 loop rather than building an array or JSONRows table. This file consumer keeps
 resource ownership explicit (the path is supplied by the caller):
 
-```buoy
+```basic
 Import csvkit
 
 Class ExportFileSink Implements CSVByteSink
@@ -131,7 +130,3 @@ Sub Main(args As Array Of String)
     End Try
 End Sub
 ```
-
-`tests/run_csv_stream_writer_tests.py` runs a source-backed file consumer and
-compares 100001 records containing quotes, newlines and Unicode against Python's
-CSV writer, alongside exact-byte, record-limit, failure and ownership controls.

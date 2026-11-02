@@ -11,7 +11,7 @@ related: ["index.md", "api.md", "typed-api.md"]
 
 Install the csvkit archive in your packages directory or configure a local BPM path dependency to its source directory. The example parses a header plus one quoted record, changes a field, and writes canonical CSV text without reading or writing files.
 
-```buoy
+```basic
 Import csvkit
 
 Sub Main()

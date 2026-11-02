@@ -25,8 +25,6 @@ One CSV record. Fields are mutable strings in an ordered resizable array.
 | --- | --- | --- | --- | --- | --- |
 | `Fields` | `Array Of String` | No | No | — | — |
 
-## CSVKit functions
-
 ### ParseCSV
 
 `Public Function ParseCSV(text As String, delimiter As String = ",", maxCharacters As Integer = 1000000, maxRecords As Integer = 100000, maxFields As Integer = 10000) As Array Of CSVRecord`

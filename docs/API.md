@@ -88,14 +88,6 @@ parser even if they would have been drained after that feed returned. There are
 no callbacks or implicit disk reads. Bytes/encoding boundaries, BOM handling,
 file ownership and asynchronous backpressure remain caller responsibilities.
 
-
-This suite checks module/test/example on six targets, executes 100000 separately
-drained rows under an eight-character buffer budget, and compares 40 Python CSV
-tables at every two-chunk split and nine deterministic chunk schedules. It also
-runs the original document parser/writer suite. The
-streaming example (not included in this repository)
-demonstrates draining around chunks that split quotes and CRLF.
-
 ## Relationship to existing Buoy code
 
 Built-in String operations do not frame CSV records. StringUtils's
@@ -104,24 +96,11 @@ CSVKit adds whole-document CR/LF framing, multiline records, record and field
 limits, strict document errors and canonical writing. CSVKit is standalone so
 CSV consumers need not import unrelated StringUtils operations.
 
-## Use and verification
+## Install and build
 
-This directory has compiler and BPM manifests. A local BPM dependency can use
-`{"path":"../libraries/csvkit"}`. A sealed package is supplied at
-`packages/csvkit-0.1.0.buipkg`; no remote publication was performed.
-
-```sh
-/usr/bin/buoy pkg seal . -o packages/csvkit-0.1.0.buipkg
-```
-
-The absolute package command is a workaround for this development host's
-compiler wrapper; elsewhere use `buoy pkg seal` normally. `BUOY` and
-`BUOY_PACKAGER` override the verification commands. The runner builds isolated
-consumers using a freshly sealed package, checks module/test/example on six
-desktop targets, runs strict syntax/bounds tests and compares 100 generated
-records (500 fields) plus the singleton-empty-field edge case with Python's
-standard-library CSV reader/writer. Cross-target checks do not establish native
-runtime behavior on those platforms. Execution was verified on Linux.
+The package root contains the compiler manifest, BPM dependency metadata and
+source modules. `Import csvkit` after installing it into the consumer project.
+The repository README documents source building with the native package driver.
 
 ## Incremental UTF-8 export
 
@@ -166,7 +145,7 @@ For generated or query rows, create and submit one record inside the producer's
 loop rather than building an array or JSONRows table. This file consumer keeps
 resource ownership explicit (the path is supplied by the caller):
 
-```buoy
+```basic
 Import csvkit
 
 Class ExportFileSink Implements CSVByteSink
@@ -197,9 +176,3 @@ Sub Main(args As Array Of String)
     End Try
 End Sub
 ```
-
-`tests/run_csv_stream_writer_tests.py` runs a source-backed file consumer and
-compares 100001 records containing quotes, newlines and Unicode against Python's
-CSV writer, alongside exact-byte, record-limit, failure and ownership controls.
-
-Test suites and fixtures are maintainer-local and are not part of this public repository.
