@@ -1,4 +1,4 @@
-# Strict CSV documents and streams
+# Strict CSV
 
 Bounded CSV document parsing and writing in pure Buoy, inspired by
 [Norman Palardy's CSVParser](https://github.com/npalardy/CSVParser).
