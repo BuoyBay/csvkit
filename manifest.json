@@ -1,1 +1,1 @@
-{"schema":1,"name":"csvkit","version":"0.1.0","description":"Bounded strict CSV document and incremental parsing, with canonical writing in pure Buoy"}
+{"schema":1,"name":"csvkit","version":"0.1.0","description":"Parse and write strict CSV documents and streams"}
